@@ -1,46 +1,721 @@
-Google 开源项目风格指南——中文版
-================================
+"AKIQRBRXTC"
+=$ docker container run --rm -it -p 8501:8501 resilience
+cgit logo	index : kernel/git/torvalds/linux.git	
 
-* ReadTheDocs 托管地址： `在线阅读最新版本 <https://zh-google-styleguide.readthedocs.io/en/latest/>`_
+master
+ 
+Linux kernel source tree	Linus Torvalds
+aboutsummaryrefslogtreecommitdiffstats	
 
-* GitHub 托管地址： `zh-google-styleguide <https://github.com/zh-google-styleguide/zh-google-styleguide>`_
+log msg
+ 
+ 
+diff options
+context:	
+3
+space:	
+include
+mode:	
+unified
+Diffstat
+-rw-r--r--	arch/x86/coco/sev/core.c	23	
+-rw-r--r--	arch/x86/include/asm/pgtable-2level_types.h	8	
+-rw-r--r--	arch/x86/include/asm/sev.h	6	
+-rw-r--r--	arch/x86/kernel/amd_nb.c	9	
+-rw-r--r--	arch/x86/kernel/cpu/microcode/amd.c	6	
+-rw-r--r--	drivers/virt/coco/sev-guest/sev-guest.c	58	
+6 files changed, 67 insertions, 43 deletions
+diff --git a/arch/x86/coco/sev/core.c b/arch/x86/coco/sev/core.c
+index 82492efc5d9499..96c7bc698e6b62 100644
+--- a/arch/x86/coco/sev/core.c
++++ b/arch/x86/coco/sev/core.c
+@@ -2853,19 +2853,8 @@ struct snp_msg_desc *snp_msg_alloc(void)
+ 	if (!mdesc->response)
+ 		goto e_free_request;
+ 
+-	mdesc->certs_data = alloc_shared_pages(SEV_FW_BLOB_MAX_SIZE);
+-	if (!mdesc->certs_data)
+-		goto e_free_response;
+-
+-	/* initial the input address for guest request */
+-	mdesc->input.req_gpa = __pa(mdesc->request);
+-	mdesc->input.resp_gpa = __pa(mdesc->response);
+-	mdesc->input.data_gpa = __pa(mdesc->certs_data);
+-
+ 	return mdesc;
+ 
+-e_free_response:
+-	free_shared_pages(mdesc->response, sizeof(struct snp_guest_msg));
+ e_free_request:
+ 	free_shared_pages(mdesc->request, sizeof(struct snp_guest_msg));
+ e_unmap:
+@@ -2885,7 +2874,6 @@ void snp_msg_free(struct snp_msg_desc *mdesc)
+ 	kfree(mdesc->ctx);
+ 	free_shared_pages(mdesc->response, sizeof(struct snp_guest_msg));
+ 	free_shared_pages(mdesc->request, sizeof(struct snp_guest_msg));
+-	free_shared_pages(mdesc->certs_data, SEV_FW_BLOB_MAX_SIZE);
+ 	iounmap((__force void __iomem *)mdesc->secrets);
+ 
+ 	memset(mdesc, 0, sizeof(*mdesc));
+@@ -3054,7 +3042,7 @@ retry_request:
+ 	 * sequence number must be incremented or the VMPCK must be deleted to
+ 	 * prevent reuse of the IV.
+ 	 */
+-	rc = snp_issue_guest_request(req, &mdesc->input, rio);
++	rc = snp_issue_guest_request(req, &req->input, rio);
+ 	switch (rc) {
+ 	case -ENOSPC:
+ 		/*
+@@ -3064,7 +3052,7 @@ retry_request:
+ 		 * order to increment the sequence number and thus avoid
+ 		 * IV reuse.
+ 		 */
+-		override_npages = mdesc->input.data_npages;
++		override_npages = req->input.data_npages;
+ 		req->exit_code	= SVM_VMGEXIT_GUEST_REQUEST;
+ 
+ 		/*
+@@ -3120,7 +3108,7 @@ retry_request:
+ 	}
+ 
+ 	if (override_npages)
+-		mdesc->input.data_npages = override_npages;
++		req->input.data_npages = override_npages;
+ 
+ 	return rc;
+ }
+@@ -3158,6 +3146,11 @@ int snp_send_guest_request(struct snp_msg_desc *mdesc, struct snp_guest_req *req
+ 	 */
+ 	memcpy(mdesc->request, &mdesc->secret_request, sizeof(mdesc->secret_request));
+ 
++	/* Initialize the input address for guest request */
++	req->input.req_gpa = __pa(mdesc->request);
++	req->input.resp_gpa = __pa(mdesc->response);
++	req->input.data_gpa = req->certs_data ? __pa(req->certs_data) : 0;
++
+ 	rc = __handle_guest_request(mdesc, req, rio);
+ 	if (rc) {
+ 		if (rc == -EIO &&
+diff --git a/arch/x86/include/asm/pgtable-2level_types.h b/arch/x86/include/asm/pgtable-2level_types.h
+index 7f6ccff0ba727c..4a12c276b1812c 100644
+--- a/arch/x86/include/asm/pgtable-2level_types.h
++++ b/arch/x86/include/asm/pgtable-2level_types.h
+@@ -23,17 +23,17 @@ typedef union {
+ #define ARCH_PAGE_TABLE_SYNC_MASK	PGTBL_PMD_MODIFIED
+ 
+ /*
+- * traditional i386 two-level paging structure:
++ * Traditional i386 two-level paging structure:
+  */
+ 
+ #define PGDIR_SHIFT	22
+ #define PTRS_PER_PGD	1024
+ 
+-
+ /*
+- * the i386 is two-level, so we don't really have any
+- * PMD directory physically.
++ * The i386 is two-level, so we don't really have any
++ * PMD directory physically:
+  */
++#define PTRS_PER_PMD	1
+ 
+ #define PTRS_PER_PTE	1024
+ 
+diff --git a/arch/x86/include/asm/sev.h b/arch/x86/include/asm/sev.h
+index 1581246491b544..ba7999f66abe6d 100644
+--- a/arch/x86/include/asm/sev.h
++++ b/arch/x86/include/asm/sev.h
+@@ -203,6 +203,9 @@ struct snp_guest_req {
+ 	unsigned int vmpck_id;
+ 	u8 msg_version;
+ 	u8 msg_type;
++
++	struct snp_req_data input;
++	void *certs_data;
+ };
+ 
+ /*
+@@ -263,9 +266,6 @@ struct snp_msg_desc {
+ 	struct snp_guest_msg secret_request, secret_response;
+ 
+ 	struct snp_secrets_page *secrets;
+-	struct snp_req_data input;
+-
+-	void *certs_data;
+ 
+ 	struct aesgcm_ctx *ctx;
+ 
+diff --git a/arch/x86/kernel/amd_nb.c b/arch/x86/kernel/amd_nb.c
+index 11fac09e3a8cb5..67e773744edb22 100644
+--- a/arch/x86/kernel/amd_nb.c
++++ b/arch/x86/kernel/amd_nb.c
+@@ -143,7 +143,6 @@ bool __init early_is_amd_nb(u32 device)
+ 
+ struct resource *amd_get_mmconfig_range(struct resource *res)
+ {
+-	u32 address;
+ 	u64 base, msr;
+ 	unsigned int segn_busn_bits;
+ 
+@@ -151,13 +150,11 @@ struct resource *amd_get_mmconfig_range(struct resource *res)
+ 	    boot_cpu_data.x86_vendor != X86_VENDOR_HYGON)
+ 		return NULL;
+ 
+-	/* assume all cpus from fam10h have mmconfig */
+-	if (boot_cpu_data.x86 < 0x10)
++	/* Assume CPUs from Fam10h have mmconfig, although not all VMs do */
++	if (boot_cpu_data.x86 < 0x10 ||
++	    rdmsrl_safe(MSR_FAM10H_MMIO_CONF_BASE, &msr))
+ 		return NULL;
+ 
+-	address = MSR_FAM10H_MMIO_CONF_BASE;
+-	rdmsrl(address, msr);
+-
+ 	/* mmconfig is not enabled */
+ 	if (!(msr & FAM10H_MMIO_CONF_ENABLE))
+ 		return NULL;
+diff --git a/arch/x86/kernel/cpu/microcode/amd.c b/arch/x86/kernel/cpu/microcode/amd.c
+index 95ac1c6a84fbec..c69b1bc4548341 100644
+--- a/arch/x86/kernel/cpu/microcode/amd.c
++++ b/arch/x86/kernel/cpu/microcode/amd.c
+@@ -175,23 +175,29 @@ static bool need_sha_check(u32 cur_rev)
+ {
+ 	switch (cur_rev >> 8) {
+ 	case 0x80012: return cur_rev <= 0x800126f; break;
++	case 0x80082: return cur_rev <= 0x800820f; break;
+ 	case 0x83010: return cur_rev <= 0x830107c; break;
+ 	case 0x86001: return cur_rev <= 0x860010e; break;
+ 	case 0x86081: return cur_rev <= 0x8608108; break;
+ 	case 0x87010: return cur_rev <= 0x8701034; break;
+ 	case 0x8a000: return cur_rev <= 0x8a0000a; break;
++	case 0xa0010: return cur_rev <= 0xa00107a; break;
+ 	case 0xa0011: return cur_rev <= 0xa0011da; break;
+ 	case 0xa0012: return cur_rev <= 0xa001243; break;
++	case 0xa0082: return cur_rev <= 0xa00820e; break;
+ 	case 0xa1011: return cur_rev <= 0xa101153; break;
+ 	case 0xa1012: return cur_rev <= 0xa10124e; break;
+ 	case 0xa1081: return cur_rev <= 0xa108109; break;
+ 	case 0xa2010: return cur_rev <= 0xa20102f; break;
+ 	case 0xa2012: return cur_rev <= 0xa201212; break;
++	case 0xa4041: return cur_rev <= 0xa404109; break;
++	case 0xa5000: return cur_rev <= 0xa500013; break;
+ 	case 0xa6012: return cur_rev <= 0xa60120a; break;
+ 	case 0xa7041: return cur_rev <= 0xa704109; break;
+ 	case 0xa7052: return cur_rev <= 0xa705208; break;
+ 	case 0xa7080: return cur_rev <= 0xa708009; break;
+ 	case 0xa70c0: return cur_rev <= 0xa70C009; break;
++	case 0xaa001: return cur_rev <= 0xaa00116; break;
+ 	case 0xaa002: return cur_rev <= 0xaa00218; break;
+ 	default: break;
+ 	}
+diff --git a/drivers/virt/coco/sev-guest/sev-guest.c b/drivers/virt/coco/sev-guest/sev-guest.c
+index 264b6523fe52fe..70fbc9a3e703d1 100644
+--- a/drivers/virt/coco/sev-guest/sev-guest.c
++++ b/drivers/virt/coco/sev-guest/sev-guest.c
+@@ -38,12 +38,6 @@ struct snp_guest_dev {
+ 	struct miscdevice misc;
+ 
+ 	struct snp_msg_desc *msg_desc;
+-
+-	union {
+-		struct snp_report_req report;
+-		struct snp_derived_key_req derived_key;
+-		struct snp_ext_report_req ext_report;
+-	} req;
+ };
+ 
+ /*
+@@ -71,7 +65,7 @@ struct snp_req_resp {
+ 
+ static int get_report(struct snp_guest_dev *snp_dev, struct snp_guest_request_ioctl *arg)
+ {
+-	struct snp_report_req *report_req = &snp_dev->req.report;
++	struct snp_report_req *report_req __free(kfree) = NULL;
+ 	struct snp_msg_desc *mdesc = snp_dev->msg_desc;
+ 	struct snp_report_resp *report_resp;
+ 	struct snp_guest_req req = {};
+@@ -80,6 +74,10 @@ static int get_report(struct snp_guest_dev *snp_dev, struct snp_guest_request_io
+ 	if (!arg->req_data || !arg->resp_data)
+ 		return -EINVAL;
+ 
++	report_req = kzalloc(sizeof(*report_req), GFP_KERNEL_ACCOUNT);
++	if (!report_req)
++		return -ENOMEM;
++
+ 	if (copy_from_user(report_req, (void __user *)arg->req_data, sizeof(*report_req)))
+ 		return -EFAULT;
+ 
+@@ -116,7 +114,7 @@ e_free:
+ 
+ static int get_derived_key(struct snp_guest_dev *snp_dev, struct snp_guest_request_ioctl *arg)
+ {
+-	struct snp_derived_key_req *derived_key_req = &snp_dev->req.derived_key;
++	struct snp_derived_key_req *derived_key_req __free(kfree) = NULL;
+ 	struct snp_derived_key_resp derived_key_resp = {0};
+ 	struct snp_msg_desc *mdesc = snp_dev->msg_desc;
+ 	struct snp_guest_req req = {};
+@@ -136,6 +134,10 @@ static int get_derived_key(struct snp_guest_dev *snp_dev, struct snp_guest_reque
+ 	if (sizeof(buf) < resp_len)
+ 		return -ENOMEM;
+ 
++	derived_key_req = kzalloc(sizeof(*derived_key_req), GFP_KERNEL_ACCOUNT);
++	if (!derived_key_req)
++		return -ENOMEM;
++
+ 	if (copy_from_user(derived_key_req, (void __user *)arg->req_data,
+ 			   sizeof(*derived_key_req)))
+ 		return -EFAULT;
+@@ -168,16 +170,21 @@ static int get_ext_report(struct snp_guest_dev *snp_dev, struct snp_guest_reques
+ 			  struct snp_req_resp *io)
+ 
+ {
+-	struct snp_ext_report_req *report_req = &snp_dev->req.ext_report;
++	struct snp_ext_report_req *report_req __free(kfree) = NULL;
+ 	struct snp_msg_desc *mdesc = snp_dev->msg_desc;
+ 	struct snp_report_resp *report_resp;
+ 	struct snp_guest_req req = {};
+ 	int ret, npages = 0, resp_len;
+ 	sockptr_t certs_address;
++	struct page *page;
+ 
+ 	if (sockptr_is_null(io->req_data) || sockptr_is_null(io->resp_data))
+ 		return -EINVAL;
+ 
++	report_req = kzalloc(sizeof(*report_req), GFP_KERNEL_ACCOUNT);
++	if (!report_req)
++		return -ENOMEM;
++
+ 	if (copy_from_sockptr(report_req, io->req_data, sizeof(*report_req)))
+ 		return -EFAULT;
+ 
+@@ -203,8 +210,20 @@ static int get_ext_report(struct snp_guest_dev *snp_dev, struct snp_guest_reques
+ 	 * the host. If host does not supply any certs in it, then copy
+ 	 * zeros to indicate that certificate data was not provided.
+ 	 */
+-	memset(mdesc->certs_data, 0, report_req->certs_len);
+ 	npages = report_req->certs_len >> PAGE_SHIFT;
++	page = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO,
++			   get_order(report_req->certs_len));
++	if (!page)
++		return -ENOMEM;
++
++	req.certs_data = page_address(page);
++	ret = set_memory_decrypted((unsigned long)req.certs_data, npages);
++	if (ret) {
++		pr_err("failed to mark page shared, ret=%d\n", ret);
++		__free_pages(page, get_order(report_req->certs_len));
++		return -EFAULT;
++	}
++
+ cmd:
+ 	/*
+ 	 * The intermediate response buffer is used while decrypting the
+@@ -213,10 +232,12 @@ cmd:
+ 	 */
+ 	resp_len = sizeof(report_resp->data) + mdesc->ctx->authsize;
+ 	report_resp = kzalloc(resp_len, GFP_KERNEL_ACCOUNT);
+-	if (!report_resp)
+-		return -ENOMEM;
++	if (!report_resp) {
++		ret = -ENOMEM;
++		goto e_free_data;
++	}
+ 
+-	mdesc->input.data_npages = npages;
++	req.input.data_npages = npages;
+ 
+ 	req.msg_version = arg->msg_version;
+ 	req.msg_type = SNP_MSG_REPORT_REQ;
+@@ -231,7 +252,7 @@ cmd:
+ 
+ 	/* If certs length is invalid then copy the returned length */
+ 	if (arg->vmm_error == SNP_GUEST_VMM_ERR_INVALID_LEN) {
+-		report_req->certs_len = mdesc->input.data_npages << PAGE_SHIFT;
++		report_req->certs_len = req.input.data_npages << PAGE_SHIFT;
+ 
+ 		if (copy_to_sockptr(io->req_data, report_req, sizeof(*report_req)))
+ 			ret = -EFAULT;
+@@ -240,7 +261,7 @@ cmd:
+ 	if (ret)
+ 		goto e_free;
+ 
+-	if (npages && copy_to_sockptr(certs_address, mdesc->certs_data, report_req->certs_len)) {
++	if (npages && copy_to_sockptr(certs_address, req.certs_data, report_req->certs_len)) {
+ 		ret = -EFAULT;
+ 		goto e_free;
+ 	}
+@@ -250,6 +271,13 @@ cmd:
+ 
+ e_free:
+ 	kfree(report_resp);
++e_free_data:
++	if (npages) {
++		if (set_memory_encrypted((unsigned long)req.certs_data, npages))
++			WARN_ONCE(ret, "failed to restore encryption mask (leak it)\n");
++		else
++			__free_pages(page, get_order(report_req->certs_len));
++	}
+ 	return ret;
+ }
+ 
+generated by cgit 1.2.3-korg (git 2.43.0) at 2025-03-09 12:38:19 +0000cgit logo	index : kernel/git/torvalds/linux.git	
 
-* 离线文档下载地址： `release <https://github.com/zh-google-styleguide/zh-google-styleguide/releases>`_
+master
+ 
+Linux kernel source tree	Linus Torvalds
+aboutsummaryrefslogtreecommitdiffstats	
 
-.. note:: 
-
-    **声明**
-
-    本项目并非 Google 官方项目，而是由国内程序员凭热情创建和维护。
-
-    如果你关注的是 Google 官方英文版，请移步 `Google Style Guide <https://github.com/google/styleguide>`_ 。
-
-每个较大的开源项目都有自己的风格指南：关于如何为该项目编写代码的一系列约定（有时候会比较武断）。当所有代码均保持一致的风格，在理解大型代码库时更为轻松。
-
-“风格”的含义涵盖范围广，从“变量使用驼峰格式（camelCase）”到“决不使用全局变量”再到“决不使用异常”，等等诸如此类。
-
-英文版项目维护的是在 Google 使用的编程风格指南。如果你正在修改的项目源自 Google，你可能会被引导至英文版项目页面，以了解项目所使用的风格。
-
-我们已经发布了 **8** 份 **中文版** 的风格指南:
-
-#. `Google C++ 风格指南 <https://zh-google-styleguide.readthedocs.org/en/latest/google-cpp-styleguide/>`_
-
-#. `Google Objective-C 风格指南 <https://zh-google-styleguide.readthedocs.org/en/latest/google-objc-styleguide/>`_
-
-#. `Google Python 风格指南 <https://zh-google-styleguide.readthedocs.org/en/latest/google-python-styleguide/>`_
-
-#. `Google Shell 风格指南 <https://zh-google-styleguide.readthedocs.org/en/latest/google-shell-styleguide/>`_
-
-#. `Google JavaScript 风格指南 <https://zh-google-styleguide.readthedocs.io/en/latest/google-javascript-styleguide/>`_
-
-#. `Google TypeScript 风格指南 <https://zh-google-styleguide.readthedocs.io/en/latest/google-typescript-styleguide/>`_
-
-#. `Google HTML/CSS 风格指南 <https://zh-google-styleguide.readthedocs.io/en/latest/google-html-css-styleguide/>`_
-
-#. `Google Java 风格指南 <https://zh-google-styleguide.readthedocs.io/en/latest/google-java-styleguide/>`_
-
-中文版项目采用 reStructuredText 纯文本标记语法，并使用 Sphinx 生成 HTML / CHM / PDF 等文档格式。
-
-* 英文版项目还包含 `cpplint <https://github.com/google/styleguide/tree/gh-pages/cpplint>`_ ——一个用来帮助适应风格准则的工具，以及 `google-c-style.el <https://raw.githubusercontent.com/google/styleguide/gh-pages/google-c-style.el>`_，Google 风格的 Emacs 配置文件。
-
-* 另外，招募志愿者翻译 `XML Document Format Style Guide <https://google.github.io/styleguide/xmlstyle.html>`_ ，有意者请联系 `Yang.Y <https://github.com/yangyubo>`_ 。
+log msg
+ 
+ 
+diff options
+context:	
+3
+space:	
+include
+mode:	
+unified
+Diffstat
+-rw-r--r--	arch/x86/coco/sev/core.c	23	
+-rw-r--r--	arch/x86/include/asm/pgtable-2level_types.h	8	
+-rw-r--r--	arch/x86/include/asm/sev.h	6	
+-rw-r--r--	arch/x86/kernel/amd_nb.c	9	
+-rw-r--r--	arch/x86/kernel/cpu/microcode/amd.c	6	
+-rw-r--r--	drivers/virt/coco/sev-guest/sev-guest.c	58	
+6 files changed, 67 insertions, 43 deletions
+diff --git a/arch/x86/coco/sev/core.c b/arch/x86/coco/sev/core.c
+index 82492efc5d9499..96c7bc698e6b62 100644
+--- a/arch/x86/coco/sev/core.c
++++ b/arch/x86/coco/sev/core.c
+@@ -2853,19 +2853,8 @@ struct snp_msg_desc *snp_msg_alloc(void)
+ 	if (!mdesc->response)
+ 		goto e_free_request;
+ 
+-	mdesc->certs_data = alloc_shared_pages(SEV_FW_BLOB_MAX_SIZE);
+-	if (!mdesc->certs_data)
+-		goto e_free_response;
+-
+-	/* initial the input address for guest request */
+-	mdesc->input.req_gpa = __pa(mdesc->request);
+-	mdesc->input.resp_gpa = __pa(mdesc->response);
+-	mdesc->input.data_gpa = __pa(mdesc->certs_data);
+-
+ 	return mdesc;
+ 
+-e_free_response:
+-	free_shared_pages(mdesc->response, sizeof(struct snp_guest_msg));
+ e_free_request:
+ 	free_shared_pages(mdesc->request, sizeof(struct snp_guest_msg));
+ e_unmap:
+@@ -2885,7 +2874,6 @@ void snp_msg_free(struct snp_msg_desc *mdesc)
+ 	kfree(mdesc->ctx);
+ 	free_shared_pages(mdesc->response, sizeof(struct snp_guest_msg));
+ 	free_shared_pages(mdesc->request, sizeof(struct snp_guest_msg));
+-	free_shared_pages(mdesc->certs_data, SEV_FW_BLOB_MAX_SIZE);
+ 	iounmap((__force void __iomem *)mdesc->secrets);
+ 
+ 	memset(mdesc, 0, sizeof(*mdesc));
+@@ -3054,7 +3042,7 @@ retry_request:
+ 	 * sequence number must be incremented or the VMPCK must be deleted to
+ 	 * prevent reuse of the IV.
+ 	 */
+-	rc = snp_issue_guest_request(req, &mdesc->input, rio);
++	rc = snp_issue_guest_request(req, &req->input, rio);
+ 	switch (rc) {
+ 	case -ENOSPC:
+ 		/*
+@@ -3064,7 +3052,7 @@ retry_request:
+ 		 * order to increment the sequence number and thus avoid
+ 		 * IV reuse.
+ 		 */
+-		override_npages = mdesc->input.data_npages;
++		override_npages = req->input.data_npages;
+ 		req->exit_code	= SVM_VMGEXIT_GUEST_REQUEST;
+ 
+ 		/*
+@@ -3120,7 +3108,7 @@ retry_request:
+ 	}
+ 
+ 	if (override_npages)
+-		mdesc->input.data_npages = override_npages;
++		req->input.data_npages = override_npages;
+ 
+ 	return rc;
+ }
+@@ -3158,6 +3146,11 @@ int snp_send_guest_request(struct snp_msg_desc *mdesc, struct snp_guest_req *req
+ 	 */
+ 	memcpy(mdesc->request, &mdesc->secret_request, sizeof(mdesc->secret_request));
+ 
++	/* Initialize the input address for guest request */
++	req->input.req_gpa = __pa(mdesc->request);
++	req->input.resp_gpa = __pa(mdesc->response);
++	req->input.data_gpa = req->certs_data ? __pa(req->certs_data) : 0;
++
+ 	rc = __handle_guest_request(mdesc, req, rio);
+ 	if (rc) {
+ 		if (rc == -EIO &&
+diff --git a/arch/x86/include/asm/pgtable-2level_types.h b/arch/x86/include/asm/pgtable-2level_types.h
+index 7f6ccff0ba727c..4a12c276b1812c 100644
+--- a/arch/x86/include/asm/pgtable-2level_types.h
++++ b/arch/x86/include/asm/pgtable-2level_types.h
+@@ -23,17 +23,17 @@ typedef union {
+ #define ARCH_PAGE_TABLE_SYNC_MASK	PGTBL_PMD_MODIFIED
+ 
+ /*
+- * traditional i386 two-level paging structure:
++ * Traditional i386 two-level paging structure:
+  */
+ 
+ #define PGDIR_SHIFT	22
+ #define PTRS_PER_PGD	1024
+ 
+-
+ /*
+- * the i386 is two-level, so we don't really have any
+- * PMD directory physically.
++ * The i386 is two-level, so we don't really have any
++ * PMD directory physically:
+  */
++#define PTRS_PER_PMD	1
+ 
+ #define PTRS_PER_PTE	1024
+ 
+diff --git a/arch/x86/include/asm/sev.h b/arch/x86/include/asm/sev.h
+index 1581246491b544..ba7999f66abe6d 100644
+--- a/arch/x86/include/asm/sev.h
++++ b/arch/x86/include/asm/sev.h
+@@ -203,6 +203,9 @@ struct snp_guest_req {
+ 	unsigned int vmpck_id;
+ 	u8 msg_version;
+ 	u8 msg_type;
++
++	struct snp_req_data input;
++	void *certs_data;
+ };
+ 
+ /*
+@@ -263,9 +266,6 @@ struct snp_msg_desc {
+ 	struct snp_guest_msg secret_request, secret_response;
+ 
+ 	struct snp_secrets_page *secrets;
+-	struct snp_req_data input;
+-
+-	void *certs_data;
+ 
+ 	struct aesgcm_ctx *ctx;
+ 
+diff --git a/arch/x86/kernel/amd_nb.c b/arch/x86/kernel/amd_nb.c
+index 11fac09e3a8cb5..67e773744edb22 100644
+--- a/arch/x86/kernel/amd_nb.c
++++ b/arch/x86/kernel/amd_nb.c
+@@ -143,7 +143,6 @@ bool __init early_is_amd_nb(u32 device)
+ 
+ struct resource *amd_get_mmconfig_range(struct resource *res)
+ {
+-	u32 address;
+ 	u64 base, msr;
+ 	unsigned int segn_busn_bits;
+ 
+@@ -151,13 +150,11 @@ struct resource *amd_get_mmconfig_range(struct resource *res)
+ 	    boot_cpu_data.x86_vendor != X86_VENDOR_HYGON)
+ 		return NULL;
+ 
+-	/* assume all cpus from fam10h have mmconfig */
+-	if (boot_cpu_data.x86 < 0x10)
++	/* Assume CPUs from Fam10h have mmconfig, although not all VMs do */
++	if (boot_cpu_data.x86 < 0x10 ||
++	    rdmsrl_safe(MSR_FAM10H_MMIO_CONF_BASE, &msr))
+ 		return NULL;
+ 
+-	address = MSR_FAM10H_MMIO_CONF_BASE;
+-	rdmsrl(address, msr);
+-
+ 	/* mmconfig is not enabled */
+ 	if (!(msr & FAM10H_MMIO_CONF_ENABLE))
+ 		return NULL;
+diff --git a/arch/x86/kernel/cpu/microcode/amd.c b/arch/x86/kernel/cpu/microcode/amd.c
+index 95ac1c6a84fbec..c69b1bc4548341 100644
+--- a/arch/x86/kernel/cpu/microcode/amd.c
++++ b/arch/x86/kernel/cpu/microcode/amd.c
+@@ -175,23 +175,29 @@ static bool need_sha_check(u32 cur_rev)
+ {
+ 	switch (cur_rev >> 8) {
+ 	case 0x80012: return cur_rev <= 0x800126f; break;
++	case 0x80082: return cur_rev <= 0x800820f; break;
+ 	case 0x83010: return cur_rev <= 0x830107c; break;
+ 	case 0x86001: return cur_rev <= 0x860010e; break;
+ 	case 0x86081: return cur_rev <= 0x8608108; break;
+ 	case 0x87010: return cur_rev <= 0x8701034; break;
+ 	case 0x8a000: return cur_rev <= 0x8a0000a; break;
++	case 0xa0010: return cur_rev <= 0xa00107a; break;
+ 	case 0xa0011: return cur_rev <= 0xa0011da; break;
+ 	case 0xa0012: return cur_rev <= 0xa001243; break;
++	case 0xa0082: return cur_rev <= 0xa00820e; break;
+ 	case 0xa1011: return cur_rev <= 0xa101153; break;
+ 	case 0xa1012: return cur_rev <= 0xa10124e; break;
+ 	case 0xa1081: return cur_rev <= 0xa108109; break;
+ 	case 0xa2010: return cur_rev <= 0xa20102f; break;
+ 	case 0xa2012: return cur_rev <= 0xa201212; break;
++	case 0xa4041: return cur_rev <= 0xa404109; break;
++	case 0xa5000: return cur_rev <= 0xa500013; break;
+ 	case 0xa6012: return cur_rev <= 0xa60120a; break;
+ 	case 0xa7041: return cur_rev <= 0xa704109; break;
+ 	case 0xa7052: return cur_rev <= 0xa705208; break;
+ 	case 0xa7080: return cur_rev <= 0xa708009; break;
+ 	case 0xa70c0: return cur_rev <= 0xa70C009; break;
++	case 0xaa001: return cur_rev <= 0xaa00116; break;
+ 	case 0xaa002: return cur_rev <= 0xaa00218; break;
+ 	default: break;
+ 	}
+diff --git a/drivers/virt/coco/sev-guest/sev-guest.c b/drivers/virt/coco/sev-guest/sev-guest.c
+index 264b6523fe52fe..70fbc9a3e703d1 100644
+--- a/drivers/virt/coco/sev-guest/sev-guest.c
++++ b/drivers/virt/coco/sev-guest/sev-guest.c
+@@ -38,12 +38,6 @@ struct snp_guest_dev {
+ 	struct miscdevice misc;
+ 
+ 	struct snp_msg_desc *msg_desc;
+-
+-	union {
+-		struct snp_report_req report;
+-		struct snp_derived_key_req derived_key;
+-		struct snp_ext_report_req ext_report;
+-	} req;
+ };
+ 
+ /*
+@@ -71,7 +65,7 @@ struct snp_req_resp {
+ 
+ static int get_report(struct snp_guest_dev *snp_dev, struct snp_guest_request_ioctl *arg)
+ {
+-	struct snp_report_req *report_req = &snp_dev->req.report;
++	struct snp_report_req *report_req __free(kfree) = NULL;
+ 	struct snp_msg_desc *mdesc = snp_dev->msg_desc;
+ 	struct snp_report_resp *report_resp;
+ 	struct snp_guest_req req = {};
+@@ -80,6 +74,10 @@ static int get_report(struct snp_guest_dev *snp_dev, struct snp_guest_request_io
+ 	if (!arg->req_data || !arg->resp_data)
+ 		return -EINVAL;
+ 
++	report_req = kzalloc(sizeof(*report_req), GFP_KERNEL_ACCOUNT);
++	if (!report_req)
++		return -ENOMEM;
++
+ 	if (copy_from_user(report_req, (void __user *)arg->req_data, sizeof(*report_req)))
+ 		return -EFAULT;
+ 
+@@ -116,7 +114,7 @@ e_free:
+ 
+ static int get_derived_key(struct snp_guest_dev *snp_dev, struct snp_guest_request_ioctl *arg)
+ {
+-	struct snp_derived_key_req *derived_key_req = &snp_dev->req.derived_key;
++	struct snp_derived_key_req *derived_key_req __free(kfree) = NULL;
+ 	struct snp_derived_key_resp derived_key_resp = {0};
+ 	struct snp_msg_desc *mdesc = snp_dev->msg_desc;
+ 	struct snp_guest_req req = {};
+@@ -136,6 +134,10 @@ static int get_derived_key(struct snp_guest_dev *snp_dev, struct snp_guest_reque
+ 	if (sizeof(buf) < resp_len)
+ 		return -ENOMEM;
+ 
++	derived_key_req = kzalloc(sizeof(*derived_key_req), GFP_KERNEL_ACCOUNT);
++	if (!derived_key_req)
++		return -ENOMEM;
++
+ 	if (copy_from_user(derived_key_req, (void __user *)arg->req_data,
+ 			   sizeof(*derived_key_req)))
+ 		return -EFAULT;
+@@ -168,16 +170,21 @@ static int get_ext_report(struct snp_guest_dev *snp_dev, struct snp_guest_reques
+ 			  struct snp_req_resp *io)
+ 
+ {
+-	struct snp_ext_report_req *report_req = &snp_dev->req.ext_report;
++	struct snp_ext_report_req *report_req __free(kfree) = NULL;
+ 	struct snp_msg_desc *mdesc = snp_dev->msg_desc;
+ 	struct snp_report_resp *report_resp;
+ 	struct snp_guest_req req = {};
+ 	int ret, npages = 0, resp_len;
+ 	sockptr_t certs_address;
++	struct page *page;
+ 
+ 	if (sockptr_is_null(io->req_data) || sockptr_is_null(io->resp_data))
+ 		return -EINVAL;
+ 
++	report_req = kzalloc(sizeof(*report_req), GFP_KERNEL_ACCOUNT);
++	if (!report_req)
++		return -ENOMEM;
++
+ 	if (copy_from_sockptr(report_req, io->req_data, sizeof(*report_req)))
+ 		return -EFAULT;
+ 
+@@ -203,8 +210,20 @@ static int get_ext_report(struct snp_guest_dev *snp_dev, struct snp_guest_reques
+ 	 * the host. If host does not supply any certs in it, then copy
+ 	 * zeros to indicate that certificate data was not provided.
+ 	 */
+-	memset(mdesc->certs_data, 0, report_req->certs_len);
+ 	npages = report_req->certs_len >> PAGE_SHIFT;
++	page = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO,
++			   get_order(report_req->certs_len));
++	if (!page)
++		return -ENOMEM;
++
++	req.certs_data = page_address(page);
++	ret = set_memory_decrypted((unsigned long)req.certs_data, npages);
++	if (ret) {
++		pr_err("failed to mark page shared, ret=%d\n", ret);
++		__free_pages(page, get_order(report_req->certs_len));
++		return -EFAULT;
++	}
++
+ cmd:
+ 	/*
+ 	 * The intermediate response buffer is used while decrypting the
+@@ -213,10 +232,12 @@ cmd:
+ 	 */
+ 	resp_len = sizeof(report_resp->data) + mdesc->ctx->authsize;
+ 	report_resp = kzalloc(resp_len, GFP_KERNEL_ACCOUNT);
+-	if (!report_resp)
+-		return -ENOMEM;
++	if (!report_resp) {
++		ret = -ENOMEM;
++		goto e_free_data;
++	}
+ 
+-	mdesc->input.data_npages = npages;
++	req.input.data_npages = npages;
+ 
+ 	req.msg_version = arg->msg_version;
+ 	req.msg_type = SNP_MSG_REPORT_REQ;
+@@ -231,7 +252,7 @@ cmd:
+ 
+ 	/* If certs length is invalid then copy the returned length */
+ 	if (arg->vmm_error == SNP_GUEST_VMM_ERR_INVALID_LEN) {
+-		report_req->certs_len = mdesc->input.data_npages << PAGE_SHIFT;
++		report_req->certs_len = req.input.data_npages << PAGE_SHIFT;
+ 
+ 		if (copy_to_sockptr(io->req_data, report_req, sizeof(*report_req)))
+ 			ret = -EFAULT;
+@@ -240,7 +261,7 @@ cmd:
+ 	if (ret)
+ 		goto e_free;
+ 
+-	if (npages && copy_to_sockptr(certs_address, mdesc->certs_data, report_req->certs_len)) {
++	if (npages && copy_to_sockptr(certs_address, req.certs_data, report_req->certs_len)) {
+ 		ret = -EFAULT;
+ 		goto e_free;
+ 	}
+@@ -250,6 +271,13 @@ cmd:
+ 
+ e_free:
+ 	kfree(report_resp);
++e_free_data:
++	if (npages) {
++		if (set_memory_encrypted((unsigned long)req.certs_data, npages))
++			WARN_ONCE(ret, "failed to restore encryption mask (leak it)\n");
++		else
++			__free_pages(page, get_order(report_req->certs_len));
++	}
+ 	return ret;
+ }
+ 
+generated by cgit 1.2.3-korg (git 2.43.0) at 2025-03-09 12:38:19 +0000
